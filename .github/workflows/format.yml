@@ -1,0 +1,16 @@
+name: Format
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+
+jobs:
+  oxfmt:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+      - uses: extractions/setup-just@v2
+      - run: just fmt
+      - run: git diff --exit-code
