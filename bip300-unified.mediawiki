@@ -1,0 +1,710 @@
+<pre>
+  BIP: 300
+  Layer: Consensus (soft fork)
+  Title: Hashrate Escrows (Consensus layer)
+  Authors: Paul Sztorc <truthcoin@gmail.com>
+           CryptAxe <cryptaxe@gmail.com>
+           Roberto Santacroce <roberto@santacroce.xyz>
+  Status: Draft
+  Type: Specification
+  Assigned: 2017-08-14
+  License: BSD-2-Clause
+  Discussion: https://lists.linuxfoundation.org/pipermail/bitcoin-dev/2017-May/014364.html
+</pre>
+
+''This document unifies the original BIP-300 draft with the LayerTwo-Labs
+protocol specification, and reconciles both against the reference
+implementation.''
+
+'''It proposes no behavioural change.''' Where the three sources agreed, the
+agreed rule is stated. Where they disagreed, the disagreement is resolved in
+favour of the reference implementation and recorded in Appendix A with its
+evidence. Where the implementation itself is ambiguous, that is said plainly
+rather than papered over.
+
+''A separate companion proposal,''
+[[#Companion proposal|Non-Invalidating Resolution for BIP-300/301]]'', proposes
+relaxing a number of the block-rejection rules below. None of it is incorporated
+here. This document is the baseline against which that proposal should be
+read.''
+
+==Abstract==
+
+BIP-300 enables a new type of L2, where "withdrawals" (the L2-to-L1 txns) are
+governed by proof-of-work — instead of a federation or fixed set of pubkeys.
+
+BIP-300 emphasizes slow, transparent, and auditable withdrawals that are easy
+for honest users to get right and hard for dishonest miners to abuse. The main
+design goal for BIP-300 is ''partitioning'' — users can ignore BIP-300 txns if
+they wish; it makes no difference to L1 if the user validates all, some, or none
+of them. The second design goal is ''security'' — users of the L2 should feel
+confident that, if the L2 network is paying a lot of fees, then miners will want
+to keep it around, and the withdrawals will therefore be processed accurately.
+
+==Motivation==
+
+BIP-300 allows Bitcoin to host L2 systems whose peg is secured by hashrate
+rather than by a trusted federation. See [http://www.drivechain.info/
+drivechain.info] for background and rationale.
+
+==Conventions==
+
+The key words "MUST", "MUST NOT", "REQUIRED", "SHALL", "SHALL NOT", "SHOULD",
+"SHOULD NOT", "RECOMMENDED", "MAY", and "OPTIONAL" in this document are to be
+interpreted as described in RFC 2119.
+
+Three dispositions are used throughout, and are '''not''' interchangeable:
+
+* '''ignored''' — the message is not a BIP-300 message at all. It is treated as an ordinary script or transaction. No state changes. The block remains valid.
+* '''invalid (message)''' — the message parses as BIP-300 but violates a rule.
+* '''invalid (block)''' — the block MUST be rejected by BIP-300 enforcing nodes.
+
+Bitcoin nodes that do not enforce BIP-300 accept all of these blocks. BIP-300
+validity is strictly narrower than Bitcoin validity, which is what makes this a
+soft fork.
+
+==Constants==
+
+<pre>
+WITHDRAWAL_BUNDLE_MAX_AGE                  = 26300
+WITHDRAWAL_BUNDLE_INCLUSION_THRESHOLD      = 13150
+
+USED_SIDECHAIN_SLOT_PROPOSAL_MAX_AGE       = 26300
+USED_SIDECHAIN_SLOT_ACTIVATION_THRESHOLD   = 13150
+
+UNUSED_SIDECHAIN_SLOT_PROPOSAL_MAX_AGE     = 2016
+UNUSED_SIDECHAIN_SLOT_ACTIVATION_THRESHOLD = 1815
+</pre>
+
+All threshold comparisons are '''strict'''. A proposal or bundle succeeds when
+its vote count is '''greater than''' the threshold, i.e. a withdrawal bundle
+requires 13151 ACKs, not 13150. See Appendix A, item 6.
+
+Non-mainnet networks MAY substitute shorter values so that a full
+activation/withdrawal cycle is testable. Such values are consensus-relevant per
+network and MUST be agreed by all enforcing nodes on that network.
+
+==Message headers==
+
+<pre>
+M1: 0x6A 0xD5 0xE0 0xC4 0xAF
+M2: 0x6A 0xD6 0xE1 0xC5 0xDF     (see Appendix A, item 1 — UNRESOLVED)
+M3: 0x6A 0xD4 0x5A 0xA9 0x43
+M4: 0x6A 0xD7 0x7D 0x17 0x76
+</pre>
+
+M5 and M6 are not tagged messages; they are identified structurally, by their
+relationship to a treasury UTXO.
+
+==Specification==
+
+===Overview===
+
+BIP-300 consists of six messages:
+
+* M1. "Propose New Sidechain"  — coinbase output
+* M2. "ACK Proposal"           — coinbase output
+* M3. "Propose Bundle"         — coinbase output
+* M4. "ACK Bundle(s)"          — coinbase output
+* M5. Deposit (L1→L2)          — ordinary transaction
+* M6. Withdrawal (L2→L1)       — ordinary transaction
+
+Enforcing nodes maintain two logical databases:
+
+* D1. The Sidechain List
+* D2. The Withdrawal List
+
+===D1 — The Sidechain List===
+
+D1 holds one entry per sidechain slot. Slots are identified by a single unsigned
+byte <code>S</code> (0–255).
+
+{| class="wikitable"
+! Field !! Type !! Description
+|-
+| Slot number || uint8 || The slot's ID. Uniquely identifies each sidechain.
+|-
+| Description || bytes || Opaque sidechain description <code>D</code>. Not interpreted by BIP-300.
+|-
+| Active || bool || Whether this slot holds an activated sidechain.
+|-
+| Vote count || uint16 || ACKs accumulated by the proposal.
+|-
+| Proposal height || uint32 || Height of the block containing the M1.
+|-
+| Activation height || uint32 (optional) || Height at which the proposal activated.
+|-
+| CTIP outpoint || (txid, vout) || The treasury UTXO holding the sidechain's funds.
+|-
+| CTIP value || amount || Value of the treasury UTXO.
+|}
+
+The sidechain description <code>D</code> is an '''opaque byte array'''. Any
+internal structure is a convention between sidechain authors and their users and
+is '''not enforced''' by BIP-300. See Appendix A, item 8.
+
+===D2 — The Withdrawal List===
+
+Withdrawals are aggregated on L2 into "bundles". D2 holds the pending bundles
+per slot.
+
+{| class="wikitable"
+! Field !! Type !! Description
+|-
+| Slot number || uint8 || Links the bundle to a sidechain.
+|-
+| M6ID || uint256 || Blinded transaction ID of the withdrawal (see M6).
+|-
+| Vote count || uint16 || Miner upvotes. Starts at 1. Changes by at most 1 per block.
+|-
+| Proposal height || uint32 || Height of the block containing the M3.
+|}
+
+A bundle's <code>age</code> is <code>current_height - proposal_height</code>. A
+bundle is ''pending'' from the block that proposes it until it is either ''paid
+out'' (an M6 with the matching M6ID is included) or ''expired''
+(<code>age > WITHDRAWAL_BUNDLE_MAX_AGE</code>).
+
+Bundles maintain the following invariants:
+
+# The list has a canonical order: ascending by proposal height, then by coinbase output index within a block.
+# Vote counts change by at most 1 per block, in either direction, and saturate at zero.
+# A bundle whose vote count exceeds <code>WITHDRAWAL_BUNDLE_INCLUSION_THRESHOLD</code> is eligible for payout.
+# A bundle that expires is removed and pays nothing.
+
+===OP_DRIVECHAIN===
+
+This proposal adds a single new opcode. <code>OP_NOP5</code> (<code>0xB4</code>)
+is redefined as <code>OP_DRIVECHAIN</code> if and only if the entire script is
+exactly:
+
+<pre>
+OP_DRIVECHAIN OP_PUSHBYTES_1 <S> OP_TRUE
+</pre>
+
+which is exactly 4 bytes. <code>S</code> is the sidechain slot number, encoded as
+a raw unsigned byte. It is '''not''' a script number: it MUST NOT be encoded as
+<code>OP_1</code>..<code>OP_16</code> or any other push form, MUST NOT be
+sign-padded, and MUST be written as-is even for values above 127.
+
+The trailing <code>OP_TRUE</code> keeps the change a soft fork: without it, slot
+numbers 0 and 128 would cause the legacy script interpreter to fail.
+
+An output with this scriptPubKey is a '''treasury UTXO''' (historically "CTIP").
+When a treasury UTXO is spent, the additional rules of M5 or M6 MUST be
+enforced.
+
+'''There MUST never be two treasury UTXOs for the same sidechain slot.''' This
+is the central fund-safety invariant of BIP-300.
+
+===M1 — Propose Sidechain===
+
+====Encoding====
+
+<pre>
+OP_RETURN 0xD5 0xE0 0xC4 0xAF <S> <D>
+</pre>
+
+<code>S</code> is exactly 1 byte. <code>D</code> is all remaining bytes of the
+script, and is opaque. Its length is bounded only by Bitcoin's own rules.
+
+M1 MUST appear in an output of the coinbase transaction. An M1-shaped script in
+any non-coinbase transaction MUST be '''ignored'''. The output's
+<code>nValue</code> MUST be ignored.
+
+Define <code>proposal_id = sha256d(D)</code>.
+
+====Semantics====
+
+An M1 proposes that the sidechain described by <code>D</code> occupy slot
+<code>S</code>. If the slot is unused, the proposal is to '''activate'''. If the
+slot is used, the proposal is to '''overwrite''' the sidechain currently in it.
+After an overwrite, deposits to and withdrawals from the old sidechain are no
+longer recognised by BIP-300.
+
+====Validation====
+
+An M1 is '''ignored''' if it is not in a coinbase output.
+
+If a proposal with the same <code>(S, proposal_id)</code> already exists in D1
+from a previous block, the M1 MUST be '''ignored''' — it MUST NOT reset the
+existing vote count. Without this rule a miner could reset any proposal's
+progress at will.
+
+If a coinbase transaction contains two or more M1s with the same
+<code>(S, proposal_id)</code>, the block is '''invalid (block)'''.
+
+A coinbase MAY contain multiple M1s with the same <code>S</code> and different
+<code>D</code>, or with different <code>S</code> and the same <code>D</code>.
+
+''The original draft made any second M1 in a block invalidate it, regardless of
+content. The narrower rule above is the LayerTwo-Labs and implementation
+behaviour. See Appendix A, item 9.''
+
+Otherwise, a new D1 entry is created with <code>vote_count = 0</code>,
+<code>proposal_height = </code> the height of this block, and
+<code>active = false</code>.
+
+===M2 — ACK Sidechain Proposal===
+
+====Encoding====
+
+<pre>
+OP_RETURN 0xD6 0xE1 0xC5 0xDF <S> <proposal_id>
+</pre>
+
+A ''well-formed'' M2 script is exactly '''38 bytes''': the 5-byte header, 1 byte
+of <code>S</code>, and 32 bytes of <code>proposal_id</code>. Anything else MUST
+be '''ignored'''.
+
+''On the header byte see Appendix A, item 1 — this is an unresolved discrepancy
+requiring author input. On the length and slot byte see Appendix A, item 2.''
+
+====Semantics====
+
+An M2 is '''ignored''' if:
+
+* it is not within a coinbase output;
+* it is not well-formed;
+* <code>proposal_id</code> does not match any proposal created by an M1 in a previous block; or
+* <code>S</code> does not match the <code>sidechain_number</code> of that proposal.
+
+Otherwise the M2 is ''valid'' and the proposal's vote count is incremented by 1.
+
+If a coinbase transaction contains more than one well-formed M2 with the same
+<code>S</code>, the block is '''invalid (block)''', regardless of the
+<code>proposal_id</code> values.
+
+A proposal that receives no M2 in a block accrues an implicit "fail" for that
+block; <code>fails = age - vote_count</code>.
+
+====Activation====
+
+Let <code>age = current_height - proposal_height</code>.
+
+A proposal '''activates''' when:
+
+* the slot is '''unused''', <code>vote_count > UNUSED_SIDECHAIN_SLOT_ACTIVATION_THRESHOLD</code>, and <code>age <= UNUSED_SIDECHAIN_SLOT_PROPOSAL_MAX_AGE</code>; or
+* the slot is '''used''', <code>vote_count > USED_SIDECHAIN_SLOT_ACTIVATION_THRESHOLD</code>, and <code>age <= USED_SIDECHAIN_SLOT_PROPOSAL_MAX_AGE</code>.
+
+A proposal '''fails''' (and is discarded) when its age exceeds the relevant
+<code>MAX_AGE</code> without activating.
+
+The unused-slot threshold of 1815 out of 2016 blocks is a '''90%''' hashrate
+bar, not the 50% bar implied by the original draft. See Appendix A, item 3.
+
+===M3 — Propose Bundle===
+
+====Encoding====
+
+<pre>
+OP_RETURN 0xD4 0x5A 0xA9 0x43 <S> <M6ID>
+</pre>
+
+A ''well-formed'' M3 script is exactly 38 bytes: 5-byte header, 1 byte
+<code>S</code>, 32 bytes <code>M6ID</code>. Anything else MUST be '''ignored'''.
+
+====Validation====
+
+An M3 is '''ignored''' if it is not in a coinbase output or is not well-formed.
+
+The block is '''invalid (block)''' if any of the following hold:
+
+* the M3 names a sidechain slot that is not '''active''';
+* the named <code>M6ID</code> is '''already pending''' for slot <code>S</code>;
+* the coinbase contains two or more M3s with the same <code>(S, M6ID)</code>.
+
+A coinbase MAY contain multiple M3s with the same <code>S</code> and different
+<code>M6ID</code>, or with different <code>S</code> and the same
+<code>M6ID</code>.
+
+''The original draft additionally barred any bundle hash that had ever been paid
+out or rejected. That permanent blacklist is not retained; see Appendix A,
+item 4. It also barred a second M3 for the same slot in one block, which the
+LayerTwo-Labs draft and the implementation both permit.''
+
+An <code>M6ID</code> that is no longer pending — because it expired or was paid
+out — MAY be proposed again, starting a fresh vote count and expiry.
+
+Otherwise, a D2 entry is created with <code>vote_count = 1</code> and
+<code>proposal_height = </code> this block's height. Being proposed counts as
+the bundle's first upvote.
+
+===M4 — ACK Bundle(s)===
+
+====Encoding====
+
+<pre>
+OP_RETURN 0xD7 0x7D 0x17 0x76 <V> [A]
+</pre>
+
+<code>V</code> selects the version:
+
+{| class="wikitable"
+! V !! Name !! Body
+|-
+| 0x00 || <code>REPEAT_PREVIOUS</code> || none (script is exactly 6 bytes)
+|-
+| 0x01 || <code>VOTES_ONE_BYTE</code> || array of uint8
+|-
+| 0x02 || <code>VOTES_TWO_BYTE</code> || array of uint16, little-endian
+|-
+| 0x03 || <code>UPVOTE_LEADING_BY_50</code> || none (script is exactly 6 bytes)
+|}
+
+If a coinbase transaction contains more than one M4, the block is '''invalid
+(block)'''.
+
+If no M4 is present, the block abstains for every slot.
+
+====Slot indexing====
+
+Active slot numbers may be sparse, so array positions are '''not''' slot
+numbers. Enforcing nodes MUST:
+
+# Collect all active slot numbers into a vector <code>ASN</code>.
+# Sort <code>ASN</code> ascending.
+# Interpret <code>A[i]</code> as the vote for slot <code>ASN[i]</code>.
+
+====Bundle indexing====
+
+Within a slot, <code>A[i]</code> selects a bundle by position in the slot's
+pending list, sorted ascending by proposal height, ties broken by coinbase
+output index. Sentinel values:
+
+{| class="wikitable"
+! Meaning !! VOTES_ONE_BYTE !! VOTES_TWO_BYTE
+|-
+| ALARM || 0xFE || 0xFFFE
+|-
+| ABSTAIN || 0xFF || 0xFFFF
+|}
+
+====Vote semantics====
+
+For each slot <code>S_i</code> with vote <code>V_i</code>:
+
+* '''M6ID selected''' — that bundle gains 1 ACK; every other pending bundle in <code>S_i</code> loses 1.
+* '''ABSTAIN''' — no vote counts in <code>S_i</code> change.
+* '''ALARM''' — every pending bundle in <code>S_i</code> loses 1.
+
+Vote counts saturate at zero; they MUST NOT underflow.
+
+<code>REPEAT_PREVIOUS</code> casts the votes the previous block's M4 resolved
+to. Repeats chain transitively. Repeating an <code>UPVOTE_LEADING_BY_50</code>
+MUST NOT re-evaluate the leading-by-50 rule against current counts; it replays
+the resolved votes. If the previous block had no M4, or its M4 resolved to no
+votes, <code>REPEAT_PREVIOUS</code> casts no votes. A repeated upvote naming a
+bundle that is no longer pending casts no vote in that slot, and MUST NOT
+invalidate the block.
+
+<code>UPVOTE_LEADING_BY_50</code>, per slot: if some bundle leads every other
+bundle in that slot by at least 50 votes, upvote it (and downvote the rest);
+otherwise abstain in that slot.
+
+====Validation====
+
+The block is '''invalid (block)''' if any of the following hold:
+
+* the coinbase contains more than one M4;
+* <code>A</code> has more elements than <code>ASN</code>, i.e. the M4 votes in a slot that is not active;
+* an element of <code>A</code> selects a bundle index that does not exist in that slot's pending list;
+* the version is <code>VOTES_TWO_BYTE</code> and no element of <code>A</code> exceeds 253, i.e. <code>VOTES_ONE_BYTE</code> would have sufficed.
+
+''The LayerTwo-Labs draft raises all three of the latter rules as open questions.
+They are retained here as specified; the companion proposal argues for relaxing
+them.''
+
+====Mandatory payout====
+
+When a bundle's vote count exceeds
+<code>WITHDRAWAL_BUNDLE_INCLUSION_THRESHOLD</code>, the block in which this
+happens MUST include the corresponding M6. A block that does not is '''invalid
+(block)'''.
+
+===M5 — Deposit (L1 → L2)===
+
+====Semantics====
+
+An M5 moves coins from L1 into a sidechain's treasury. A transaction is an M5 if
+it creates a treasury UTXO for slot <code>S</code> whose value is '''greater
+than''' the value of the treasury UTXO it spent (or greater than zero, for the
+first ever deposit to that slot).
+
+====Structure====
+
+An M5 MUST have:
+
+# Exactly one treasury UTXO output for slot <code>S</code>, which becomes the new CTIP.
+# An address output immediately following the treasury output in <code>vout</code>: <code>OP_RETURN <A></code>, where <code>A</code> is an opaque sidechain address. Its <code>nValue</code> MUST be ignored.
+# An input spending the previous treasury UTXO for <code>S</code>, if one exists. If none exists, the previous treasury value is defined as 0.
+
+The slot number in the spent treasury UTXO MUST equal the slot number in the
+created one.
+
+<code>A</code> MUST be treated by enforcing nodes as a meaningless byte array.
+Its interpretation is the sidechain's business.
+
+A transaction that creates a larger treasury UTXO '''without''' the address
+output immediately following it is '''invalid (block)'''.
+
+''The original draft did not require the address output at all; the LayerTwo-Labs
+draft and the implementation do. See Appendix A, item 10.''
+
+====Deposit value recovery====
+
+The deposit amount is <code>V = T_new - T_old</code>. A treasury UTXO alone does
+not reveal <code>V</code>; recovering it requires the spent output's value.
+Enforcing nodes SHOULD index <code>(S, n) → (height, V, T, A)</code> so that
+deposits can be served without rescanning the chain, where <code>n</code> is a
+per-slot sequence number.
+
+Withdrawals (M6) MUST consume a sequence number, leaving a gap in the deposit
+sequence, so that the sequence records the full ordered history of treasury
+movements rather than deposits alone.
+
+===M6 — Withdrawal (L2 → L1)===
+
+====Semantics====
+
+An M6 moves coins out of a sidechain's treasury to L1 addresses. A transaction
+is an M6 if it spends a treasury UTXO and creates one whose value is '''less
+than''' the spent value.
+
+====Structure====
+
+An M6 MUST:
+
+# have '''exactly one input''', spending the treasury UTXO of slot <code>S</code>;
+# have the new treasury UTXO at '''<code>vout[0]</code>''', with the same slot number <code>S</code>;
+# have all withdrawal payout outputs at indices 1..n;
+# contain '''no''' additional <code>OP_DRIVECHAIN</code> outputs.
+
+Let <code>T_prev</code> be the spent treasury value, <code>T_new</code> the
+created treasury value, <code>P_total</code> the sum of all payout outputs, and
+<code>F_total</code> the transaction fee. Then:
+
+<pre>
+T_new = T_prev - P_total - F_total
+</pre>
+
+====M6ID and the blinded form====
+
+Bundles are voted on months before the treasury UTXO they will spend exists.
+Votes therefore commit to a '''blinded''' form of the transaction, not its final
+txid.
+
+<code>M6_blinded</code> differs from the final M6 in exactly two ways:
+
+# its <code>vin</code> is '''empty''';
+# <code>vout[0]</code> is a zero-value <code>OP_RETURN <F_total></code>, where <code>F_total</code> is a 64-bit unsigned integer encoded as '''8 bytes, big-endian''' — occupying the same index the treasury UTXO occupies in the final M6.
+
+<code>M6ID = txid(M6_blinded)</code>.
+
+Constructing the final M6 from the blinded form is therefore: replace
+<code>vout[0]</code> with the treasury output, and add the single treasury
+input. Nothing else changes, which is what lets the vote bind the payouts and
+the fee while leaving the treasury outpoint free.
+
+'''Both prior drafts specify this incorrectly and in different ways.''' See
+Appendix A, item 5. The layout above is the one the reference implementation
+uses and is the only one consistent with M6ID being stable across the treasury's
+lifetime.
+
+The blinded form MUST have a non-zero total payout.
+
+====Validation====
+
+An M6 is '''invalid (block)''' if any of the following hold:
+
+* its <code>M6ID</code> does not match a pending bundle for slot <code>S</code>;
+* that bundle's vote count does not exceed <code>WITHDRAWAL_BUNDLE_INCLUSION_THRESHOLD</code>;
+* that bundle's <code>age > WITHDRAWAL_BUNDLE_MAX_AGE</code>;
+* it has more or fewer than one input;
+* <code>vout[0]</code> is not a treasury UTXO for <code>S</code>;
+* it contains any further <code>OP_DRIVECHAIN</code> output;
+* the arithmetic above does not hold.
+
+===Transaction validation===
+
+A transaction that spends a treasury UTXO and does not create a new treasury
+UTXO for the same slot is '''invalid (block)'''.
+
+A transaction that creates a treasury UTXO for a slot whose treasury UTXO
+already exists, without spending it, is '''invalid (block)'''.
+
+A transaction that spends a treasury UTXO and creates a new one of '''equal'''
+value is '''invalid (block)''': it is neither a deposit nor a withdrawal.
+
+A transaction that appears to satisfy both the M5 and M6 structural rules is
+'''invalid (block)'''.
+
+M1–M4 never appear outside a coinbase transaction. An M1/M2/M3/M4-shaped
+OP_RETURN in a non-coinbase transaction MUST be '''ignored'''.
+
+The coinbase transaction never contains a treasury UTXO. A treasury-shaped
+output in a coinbase MUST be '''ignored'''.
+
+===Block validation===
+
+A block is '''invalid (block)''' if:
+
+* any non-coinbase transaction is invalid per the rules above;
+* it contains no transactions, i.e. has no coinbase;
+* any coinbase-message rule above is violated.
+
+==Rationale==
+
+===Why thresholds are strict===
+
+Both drafts describe the withdrawal threshold in prose as "reaches 13150 or
+greater", but the reference implementation compares strictly
+(<code>vote_count > threshold</code>). Since a bundle starts at 1 ACK on
+proposal and can gain at most 1 per block, the difference is one full block of
+hashrate approval on a 26300-block clock. This specification adopts the strict
+comparison and states it once, globally, rather than restating it per message.
+
+===Why the sidechain description is opaque===
+
+Consensus code should parse as little attacker-supplied structure as possible.
+The original draft's structured description added a parser to the consensus path
+whose only enforced property was that it parsed. Treating <code>D</code> as
+opaque and identifying proposals by <code>sha256d(D)</code> removes that surface
+without losing any enforced guarantee.
+
+===Why re-proposal is allowed===
+
+The original draft permanently blacklisted any bundle hash that was paid out or
+rejected. This is unnecessary for safety — a bundle that is paid out cannot be
+paid out twice, because the treasury UTXO it spent no longer exists — and it is
+harmful in practice, because a bundle that expires through miner apathy could
+never be retried, stranding those withdrawals forever. Allowing re-proposal with
+a fresh counter preserves safety and removes an unbounded-state requirement.
+
+==Backward compatibility==
+
+This soft fork can be deployed without modifying Bitcoin Core. Non-enforcing
+nodes accept every block that enforcing nodes accept, and additionally accept
+blocks that enforcing nodes reject.
+
+==Deployment==
+
+This BIP deploys when/if a majority of hashrate runs the enforcer client.
+
+Ideally a critical mass of users would also run it, which would strongly
+dissuade miners from de-activating it.
+
+==Reference implementation==
+
+[https://github.com/LayerTwo-Labs/bip300301_enforcer/ bip300301_enforcer], with
+the mempool/driver layer in
+[https://github.com/LayerTwo-Labs/cusf-enforcer-mempool/ cusf-enforcer-mempool].
+
+==Companion proposal==
+
+''Non-Invalidating Resolution for BIP-300/301'' proposes replacing a number of
+the block-rejection rules above with deterministic resolution — taking the first
+of a duplicate pair, treating an out-of-range vote as an abstain, and so on —
+and identifies which rejections are irreducible. '''None of it is incorporated
+in this document.''' It should be read as a delta against this baseline.
+
+Reviewers should note that every change it proposes ''relaxes'' validity, which
+between enforcer versions is a chain-splitting change rather than a soft fork,
+and therefore requires coordinated activation.
+
+==Appendix A — Reconciliation of prior drafts==
+
+Each item lists the disagreement, the resolution, and the evidence.
+
+'''1. M2 header byte — UNRESOLVED, requires author input.'''
+
+{| class="wikitable"
+! Source !! Value
+|-
+| Original BIP-300 || <code>D6 E1 C5 BF</code>
+|-
+| LayerTwo-Labs draft || <code>D6 E1 C5 BF</code>
+|-
+| Reference implementation || <code>D6 E1 C5 DF</code>
+|}
+
+The implementation disagrees with both specifications in the final byte. This
+document tentatively follows the implementation, since that is what is deployed
+and what any interoperating software must match today, but '''this must be
+confirmed by the authors before publication'''. If the specs are correct, the
+implementation has a wire-format bug; if the implementation is correct, both
+specs do. There is no way to tell from the documents alone.
+
+'''2. M2 length and slot byte.''' Original: 37 bytes, no slot number.
+LayerTwo-Labs: 38 bytes, with a 1-byte slot. Resolved in favour of 38 bytes; the
+implementation parses 1 byte of slot followed by 32 bytes of hash and rejects
+trailing data. Without the slot byte an M2 cannot be checked against the slot its
+proposal targets.
+
+'''3. Unused-slot activation threshold.''' Original: 1008 fails out of 2016
+blocks (50%). LayerTwo-Labs: 201 max fails, threshold 1815 (90%). Resolved in
+favour of 1815, per the implementation's <code>Thresholds::MAINNET</code>. This
+is a substantive policy difference, not an editorial one: it raises the bar for
+claiming an empty slot from a bare majority of hashrate to a supermajority.
+Reviewers should treat it as a deliberate change and confirm intent.
+
+'''4. Bundle re-proposal.''' Original: a bundle hash that was ever paid out or
+rejected is permanently barred. LayerTwo-Labs: only ''pending'' hashes are
+barred. Resolved in favour of the LayerTwo-Labs rule; see Rationale.
+
+'''5. M6 output layout.''' The two drafts and the implementation all differ:
+
+{| class="wikitable"
+! Source !! Treasury in M6 !! Fee OP_RETURN
+|-
+| Original BIP-300 || <code>vout[0]</code> || retained in the final M6 at <code>vout[1]</code>
+|-
+| LayerTwo-Labs || <code>vout[0]</code> in one paragraph, "last output" in two others || appended to the '''end''' of the blinded <code>vout</code>
+|-
+| Implementation || <code>vout[0]</code> || <code>vout[0]</code> of the '''blinded''' form only; replaced by the treasury output in the final M6
+|}
+
+The LayerTwo-Labs draft is internally inconsistent — it states index 0 when
+describing the M6 and "always the last output" when describing
+<code>m6_to_id</code>. Resolved in favour of the implementation: index 0 in both
+forms, with the fee OP_RETURN existing only in the blinded form. This is the
+only reading under which <code>M6ID</code> is computable before the treasury
+outpoint is known, which is the entire purpose of blinding.
+
+'''6. Threshold comparison.''' Original prose implies <code>>=</code>;
+LayerTwo-Labs and the implementation use <code>></code>. Resolved in favour of
+<code>></code>.
+
+'''7. M4 index bases.''' The original draft's worked example is internally
+inconsistent — it labels a message "version 00" (which carries no vote array)
+while showing a two-element array, and its "7th bundle / 4th bundle" prose does
+not match the bytes shown. The LayerTwo-Labs indexing algorithm (sorted active
+slots, chronologically sorted bundles, zero-based) is adopted, and the original
+example is dropped rather than repaired.
+
+'''8. Sidechain description structure.''' Original: structured (nSidechain,
+nVersion, title, description, hashID1, hashID2). LayerTwo-Labs and
+implementation: opaque bytes. Resolved in favour of opaque; see Rationale.
+
+'''9. Duplicate M1 and M3 scope.''' Original: a second M1 in a block, or a
+second M3 for the same slot, invalidates the block regardless of content.
+LayerTwo-Labs and implementation: only exact duplicates
+(<code>(S, proposal_id)</code> for M1, <code>(S, M6ID)</code> for M3) invalidate;
+differing content in the same slot is permitted. Resolved in favour of the
+narrower rule.
+
+'''10. M5 address output.''' Original: not required — an M5 is valid if it has
+one OP_DRIVECHAIN output and more coins than before. LayerTwo-Labs and
+implementation: an address <code>OP_RETURN</code> MUST immediately follow the
+treasury output. Resolved in favour of requiring it; without it a deposit cannot
+be attributed to any sidechain account.
+
+'''11. M4 open questions.''' The LayerTwo-Labs draft marks three of its own
+rules with "???" — the over-long vote array, the out-of-range bundle index, and
+the unnecessary two-byte encoding. All three are retained as specified here. The
+companion proposal argues for relaxing them; that argument is deliberately not
+made in this document.
+
+==Copyright==
+
+This BIP is licensed under the BSD 2-clause license.
