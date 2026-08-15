@@ -23,7 +23,7 @@ evidence. Where the implementation itself is ambiguous, that is said plainly
 rather than papered over.
 
 ''A separate companion proposal,''
-[[#Companion proposal|Non-Invalidating Resolution for BIP-300/301]]'', proposes
+[[bip300-unified-extended.mediawiki|Non-Invalidating Resolution for BIP-300/301]]'', proposes
 relaxing a number of the block-rejection rules below. None of it is incorporated
 here. This document is the baseline against which that proposal should be
 read.''

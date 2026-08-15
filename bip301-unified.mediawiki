@@ -21,7 +21,7 @@ favour of the reference implementation and recorded in Appendix A with its
 evidence.
 
 ''A separate companion proposal,''
-[[#Companion proposal|Non-Invalidating Resolution for BIP-300/301]]'', argues
+[[bip301-unified-extended.mediawiki|Non-Invalidating Resolution for BIP-300/301]]'', argues
 that every block-rejection rule in this BIP could be eliminated by moving BMM
 payment off-chain. None of it is incorporated here. This document is the
 baseline against which that proposal should be read.''
