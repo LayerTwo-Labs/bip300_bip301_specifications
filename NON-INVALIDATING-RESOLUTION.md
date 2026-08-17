@@ -110,7 +110,15 @@ changed so the rule is no longer needed_, which is Tier 2.
 
 Thirteen conditions. All satisfy the four conditions above; none requires any
 change to the protocol beyond the resolution rule itself. Four (marked ★) are
-open questions the LayerTwo-Labs draft raises with `???`.
+open questions the LayerTwo-Labs draft raises inline against its own rules:
+three marked `??? QUESTION` (`bip300.md` lines 401, 441, 470, all in M4) and one
+marked `/// ... ///` (line 1070, M3 for an inactive slot).
+
+The draft raises one further `???` that is **not** resolved here — what happens
+to a treasury UTXO when its slot is overwritten (line 773). That is a gap in the
+specification, not a rejection that could be converted, so it falls outside this
+document's scope. It is recorded as item 12 of Appendix A in the unified
+specifications and needs an answer from the authors.
 
 ### 4.1 Duplicate coinbase messages — take the first
 
@@ -237,6 +245,14 @@ anyone implements them.
 
 **Conditions:** `MultipleBmmRequests`, `MultipleBmmBlocks`, `DuplicateM7`,
 `NotAcceptedByMiners`, `BmmRequestExpired`
+
+> **Note on the pending M8 rework.** BMM bidding and accepting are being
+> redesigned, and the M8 _encoding_ described in the specifications descends
+> from a superseded transaction type. None of that touches this section. The
+> argument below turns on **where the M8 payment goes**, not on how the request
+> is encoded — so any re-encoding that keeps the payment on-chain leaves all
+> five conditions exactly where they are. Only §5.1's own remedy, moving the
+> payment off-chain, removes them. See BIP-301 Appendix A, item 7.
 
 #### Why selection fails
 
@@ -478,6 +494,13 @@ them earlier re-opens the fee harvest described in §5.1.
 ---
 
 ## 9. Open questions for reviewers
+
+These five are about **this document's analysis** — whether the proposed
+relaxations are sound. They are not the open questions about what the protocol
+is; those live in [`OPEN-QUESTIONS.md`](./OPEN-QUESTIONS.md), which is the
+agenda to work through with the authors. One of them, the one-proposal-per-block
+limit, would withdraw §4.1's treatment of `DuplicateM1` and the duplicate-M3
+case, so it should be settled before these are reviewed.
 
 1. **Is the harvest analysis in §5.1 complete?** It assumes the miner captures
    M8 fees through ordinary block-fee collection. If some on-chain structure
