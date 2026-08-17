@@ -25,6 +25,12 @@ none of those changes, and is the document to read first. Reviewers evaluating
 the reconciliation alone should use the baseline; this variant is for evaluating
 the reconciliation ''and'' the proposed relaxations together.
 
+Four appendix items are marked '''UNRESOLVED''' or '''OPEN DECISION''' — items
+1, 9, 12 and 13. In each case the body states what the implementation does
+today, and the appendix states the question and what answering it would change.
+They need author input before publication, and item 9 in particular would
+withdraw two of Appendix B's resolutions.
+
 ==Abstract==
 
 BIP-300 enables a new type of L2, where "withdrawals" (the L2-to-L1 txns) are
@@ -193,6 +199,12 @@ sign-padded, and MUST be written as-is even for values above 127.
 The trailing <code>OP_TRUE</code> keeps the change a soft fork: without it, slot
 numbers 0 and 128 would cause the legacy script interpreter to fail.
 
+''Moving <code>OP_DRIVECHAIN</code> off <code>OP_NOP5</code> to
+<code>OP_NOP8</code> or <code>OP_NOP9</code> has been proposed, so that BIP-300
+does not sit on a number a future Bitcoin Core soft fork might want. The choice
+of NOP is arbitrary and nothing else in this document depends on it. This is an
+open decision; see Appendix A, item 13.''
+
 An output with this scriptPubKey is a '''treasury UTXO''' (historically "CTIP").
 When a treasury UTXO is spent, the additional rules of M5 or M6 MUST be
 enforced.
@@ -225,6 +237,11 @@ slot is used, the proposal is to '''overwrite''' the sidechain currently in it.
 After an overwrite, deposits to and withdrawals from the old sidechain are no
 longer recognised by BIP-300.
 
+''What becomes of the overwritten sidechain's treasury UTXO — and therefore of
+the funds in it — is not answered by any of the three sources, nor by this
+variant. See Appendix A, item 12; this is unresolved and requires author
+input.''
+
 ====Validation====
 
 An M1 is '''ignored''' if it is not in a coinbase output.
@@ -241,9 +258,11 @@ by the same rule: the first creates the D1 entry, and every later one is
 '''ignored''' because the proposal now exists.
 
 ''The original draft made any second M1 in a block invalidate it, regardless of
-content, and the LayerTwo-Labs draft and the implementation invalidate on exact
-duplicates. See Appendix A, item 9; this specification resolves them
-deterministically instead — see Appendix B, item 1.''
+content — a deliberate one-proposal-per-block rate limit — and the LayerTwo-Labs
+draft and the implementation invalidate on exact duplicates only. This
+specification resolves the duplicates deterministically instead; see Appendix B,
+item 1. Whether the original rate limit should be restored, which would withdraw
+that resolution, is an open decision; see Appendix A, item 9.''
 
 Otherwise, a new D1 entry is created with <code>vote_count = 0</code>,
 <code>proposal_height = </code> the height of this block, and
@@ -333,8 +352,9 @@ A coinbase MAY contain multiple M3s with the same <code>S</code> and different
 <code>M6ID</code>.
 
 ''The original draft invalidated the block for a second M3 for the same slot
-regardless of content; the LayerTwo-Labs draft and the implementation both
-permit it. See Appendix A, item 9, and Appendix B, item 10.''
+regardless of content — the same rate limit it applied to M1; the LayerTwo-Labs
+draft and the implementation both permit it. See Appendix B, item 10, and, for
+whether the rate limit should be restored, Appendix A, item 9.''
 
 An <code>M6ID</code> that is no longer pending — because it expired or was paid
 out — MAY be proposed again, starting a fresh vote count and expiry.
@@ -506,6 +526,17 @@ An M6 MUST:
 # have the new treasury UTXO at '''<code>vout[0]</code>''', with the same slot number <code>S</code>;
 # have all withdrawal payout outputs at indices 1..n;
 # contain '''no''' additional <code>OP_DRIVECHAIN</code> outputs.
+
+<code>vout[0]</code> '''is''' the change output. Whatever treasury balance
+remains after the bundle's payouts and the transaction fee is returned to the
+same slot's treasury as a single UTXO, and that UTXO becomes the slot's new
+CTIP. It is the only <code>OP_DRIVECHAIN</code> output an M6 may contain: a
+withdrawal never creates a second one, and never leaves the slot without one.
+This is unchanged from the original design — all three sources return the change
+to the treasury at <code>vout[0]</code>, and their disagreement in Appendix A,
+item 5 is about the fee <code>OP_RETURN</code>, not about the change. Appendix A,
+item 10 does not bear on it either; that item concerns deposits only, and
+nothing in Appendix B changes it.
 
 Let <code>T_prev</code> be the spent treasury value, <code>T_new</code> the
 created treasury value, <code>P_total</code> the sum of all payout outputs, and
@@ -716,13 +747,38 @@ example is dropped rather than repaired.
 nVersion, title, description, hashID1, hashID2). LayerTwo-Labs and
 implementation: opaque bytes. Resolved in favour of opaque; see Rationale.
 
-'''9. Duplicate M1 and M3 scope.''' Original: a second M1 in a block, or a
-second M3 for the same slot, invalidates the block regardless of content.
-LayerTwo-Labs and implementation: only exact duplicates
-(<code>(S, proposal_id)</code> for M1, <code>(S, M6ID)</code> for M3) invalidate;
-differing content in the same slot is permitted. Resolved in favour of the
-narrower rule — and then, in this variant, resolved deterministically rather
-than by rejection; see Appendix B, item 1.
+'''9. Duplicate M1 and M3 scope — OPEN DECISION, resolved provisionally.'''
+Original: a second M1 in a block, or a second M3 for the same slot, invalidates
+the block regardless of content. LayerTwo-Labs and implementation: only exact
+duplicates (<code>(S, proposal_id)</code> for M1, <code>(S, M6ID)</code> for M3)
+invalidate; differing content in the same slot is permitted. The body above
+follows the implementation, and this variant then resolves the remaining
+duplicates deterministically rather than by rejection; see Appendix B, items 1
+and 10.
+
+The narrowing was '''not''' a deliberate policy change. The original rule was a
+rate limit — one sidechain proposal per block — and it served two purposes:
+
+* '''Anti-spam and anti-blocking.''' One M1 per block means no miner can fill a coinbase with proposals, either to grief the slot table or to crowd out someone else's proposal. The same argument applies to M3 and bundle proposals.
+* '''Guarding miner attention.''' BIP-300 asks miners to form a judgement about each proposal. Metering proposals to one per block keeps that ask small, which was part of what made BIP-300 acceptable to miners at all.
+
+The current rule serves neither purpose. In review the authors restated the
+original intent: the one-per-block limit was deliberate, and the rapid
+activation of seven sidechains during testing was possible only because the
+limit is absent from the implementation.
+
+'''What is undecided''' is whether to restore it. Restoring it would mean an M1
+is valid only if it is the only M1 in its coinbase, an M3 only if it is the only
+M3 for its slot, and the reference implementation changing to match.
+
+Note the interaction with this variant specifically. Appendix B's approach is to
+replace rejections with deterministic resolution, and a restored rate limit
+points the other way: it is a rejection that exists to '''deter''' behaviour, not
+to disambiguate it. A rate limit resolved by "take the first and ignore the
+rest" is not a rate limit — the spam is free and simply has no effect, which
+defeats the miner-attention argument but not the slot-table one. If the limit is
+restored it belongs among the deliberately retained rejections at the end of
+Appendix B, and Appendix B items 1 and 10 are withdrawn.
 
 '''10. M5 address output.''' Original: not required — an M5 is valid if it has
 one OP_DRIVECHAIN output and more coins than before. LayerTwo-Labs and
@@ -730,10 +786,89 @@ implementation: an address <code>OP_RETURN</code> MUST immediately follow the
 treasury output. The requirement is adopted, but this variant does not enforce
 it by rejection; see Appendix B, item 8.
 
-'''11. M4 open questions.''' The LayerTwo-Labs draft marks three of its own
-rules with "???" — the over-long vote array, the out-of-range bundle index, and
-the unnecessary two-byte encoding. The baseline retains all three as specified.
-This variant answers all three; see Appendix B, items 5–7.
+This item concerns '''deposits only'''. It does not bear on how a withdrawal
+returns its change: an M6 returns the remaining treasury balance to the same
+slot's treasury UTXO at <code>vout[0]</code> and creates no other
+<code>OP_DRIVECHAIN</code> output, exactly as in the original design. An M6 has
+no address output — its payouts are ordinary L1 outputs, already committed to by
+the <code>M6ID</code> the miners voted on. Nothing in Appendix B changes this.
+
+'''11. M4 open questions.''' The LayerTwo-Labs draft raises three of its own M4
+rules as open questions. They appear as inline <code>??? QUESTION</code>
+comments in the body of the draft rather than in any list of open issues, which
+is what makes them easy to miss. They are quoted in full below, with their
+location in <code>bip300.md</code> as of this repository's current revision:
+
+{| class="wikitable"
+! Rule questioned !! Location !! Text of the comment !! Answered by
+|-
+| A vote array longer than the active-slot vector invalidates the block || M4, slot indexing (line 401) || ''??? QUESTION: Does the above make sense? Would it be better to ignore the excess votes in <code>A</code>?'' || Appendix B, item 5
+|-
+| An out-of-range bundle index invalidates the block || M4, <code>VOTES_ONE_BYTE</code> (line 441) || ''??? QUESTION: Would it make more sense to ignore the M4 with the index out of range error?'' || Appendix B, item 6
+|-
+| Using <code>VOTES_TWO_BYTE</code> where one byte would do invalidates the block || M4, <code>VOTES_TWO_BYTE</code> (line 470) || ''??? QUESTION: Does it make sense to enforce this rule?'' || Appendix B, item 7
+|}
+
+The baseline retains all three as specified; this variant answers all three in
+the direction the questions suggest.
+
+Two further open questions are marked the same way elsewhere in the draft and
+are '''not''' M4 questions. The first asks whether an M3 for an inactive slot
+should be ignored rather than invalidate the block (M3 conditions, line 1070,
+marked <code>/// ... ///</code> rather than <code>???</code>); Appendix B, item 4
+answers it. The second is item 12 below, which nothing answers.
+
+'''12. Treasury UTXO of an overwritten slot — UNRESOLVED, requires author
+input.''' The LayerTwo-Labs draft asks, at <code>bip300.md</code> line 773, at
+the end of the M5 section:
+
+''??? QUESTION: What happens to the treasury UTXO when a <code>used</code>
+sidechain slot is overwritten with a different sidechain? Does the same chain of
+treasury UTXOs continue?''
+
+Nothing answers it — not the original draft, not the LayerTwo-Labs draft, not
+the baseline, and not this variant. M1 above says only that deposits to and
+withdrawals from the overwritten sidechain stop being recognised, which says
+nothing about the UTXO itself.
+
+The rules as written admit only one reading. A treasury UTXO is identified
+solely by the slot number in its <code>scriptPubKey</code>; a slot has at most
+one; and an M1 overwrite changes the slot's description without touching the
+UTXO set. So the same chain of treasury UTXOs does continue, and the incoming
+sidechain inherits the outgoing sidechain's balance — which the outgoing
+sidechain's users can no longer withdraw, since their pending bundles name a
+sidechain the slot no longer describes.
+
+Whether that is the intended outcome is a fund-safety decision, not an editorial
+one, and it MUST be settled before publication. It is deliberately left out of
+Appendix B: this is a gap in the specification, not a block rejection that could
+be resolved deterministically. Note also that the 90% bar of item 3 applies to
+claiming an ''empty'' slot; overwriting a ''used'' slot needs only
+<code>USED_SIDECHAIN_SLOT_ACTIVATION_THRESHOLD</code>, a bare majority of
+hashrate sustained over 26300 blocks.
+
+'''13. Opcode choice — OPEN DECISION.''' All three sources use
+<code>OP_NOP5</code> (<code>0xB4</code>), and the body above states it. In
+review it was proposed that <code>OP_DRIVECHAIN</code> move to
+<code>OP_NOP8</code> (<code>0xB7</code>) or <code>OP_NOP9</code>
+(<code>0xB8</code>), on two grounds:
+
+* The choice is arbitrary. Nothing in BIP-300 depends on which NOP is redefined.
+* <code>OP_NOP4</code> through <code>OP_NOP7</code> are the numbers a future Bitcoin Core soft fork is most likely to reach for first, <code>OP_NOP2</code> and <code>OP_NOP3</code> having already been taken by <code>OP_CHECKLOCKTIMEVERIFY</code> and <code>OP_CHECKSEQUENCEVERIFY</code>. A collision with a real Core deployment would be far more costly to BIP-300 than choosing a different number now.
+
+The probability of such a collision is small. The cost of moving is currently
+near zero: BIP-300 is not deployed on mainnet, so no treasury UTXO exists whose
+<code>scriptPubKey</code> would have to change.
+
+A move touches the <code>OP_DRIVECHAIN</code> definition above, every treasury
+UTXO <code>scriptPubKey</code>, the reference implementation, and every
+sidechain implementation that constructs deposits or withdrawals. It does not
+touch M1–M4, which are <code>OP_RETURN</code> messages and carry no opcode, nor
+M7 and M8 in BIP-301, for the same reason. It is orthogonal to Appendix B, which
+changes no scriptPubKey.
+
+'''What is undecided''' is the number: two candidates have been named and only
+one can be used. This document keeps <code>OP_NOP5</code> until that is settled.
 
 ==Appendix B — Deterministic resolution in place of block rejection==
 
@@ -768,9 +903,15 @@ without discarding an otherwise valid block.
 | 11 || Transaction satisfying both the M5 and M6 structural rules || block invalid || classify by value delta; the normal M5/M6 rules then apply
 |}
 
-Items 4, 5, 6 and 7 correspond exactly to the four open questions the
-LayerTwo-Labs draft raises with "???"; this specification answers all four in
-the same direction.
+Items 5, 6 and 7 answer the three M4 rules the LayerTwo-Labs draft marks with
+<code>??? QUESTION</code>, in the direction those questions suggest; Appendix A,
+item 11 quotes each one and gives its location. Item 4 answers a fourth question
+the draft raises in the same spirit but marks differently
+(<code>/// Maybe it would make more sense to ignore proposals for inactive
+slots? ///</code>). The draft's remaining <code>???</code> — what happens to a
+treasury UTXO when its slot is overwritten — is '''not''' addressed here; it is
+a gap in the specification rather than a rejection that could be resolved
+deterministically. See Appendix A, item 12.
 
 The following are '''deliberately retained''' as block rejections, because for
 these the rejection is load-bearing rather than merely disambiguating: every
