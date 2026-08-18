@@ -7,15 +7,38 @@ something.
 The order is not arbitrary — see [Why this order](#why-this-order). Work down
 it.
 
-| #   | Question                                  | Where               | Blocks                              | Answerable         |
-| --- | ----------------------------------------- | ------------------- | ----------------------------------- | ------------------ |
-| 1   | Treasury UTXO when a slot is overwritten  | BIP-300 A12         | Fund safety; possibly a new rule    | Now, by discussion |
-| 2   | Which NOP opcode `OP_DRIVECHAIN` uses     | BIP-300 A13         | Every treasury `scriptPubKey`       | Now, one word      |
-| 3   | M2 header byte — `BF` or `DF`             | BIP-300 A1          | Byte-level correctness; publication | Now, one word      |
-| 4   | One M1 / M3 per block                     | BIP-300 A9          | Enforcer change; extended B1 + B10  | Now, by discussion |
-| 5   | The 90% unused-slot threshold             | BIP-300 A3          | Nothing — confirm or correct        | Now, by discussion |
-| 6   | What the M8 rework must preserve          | BIP-301 A7 (A3, A5) | The BIP-301 M8 section              | Now, partially     |
-| 7   | Five questions on the relaxation analysis | NON-INVALIDATING §9 | Only the extended variant           | Later              |
+Items 1–7 came from reconciling the three documents against each other. Items
+8–12 came from something else: **an independent implementation of BIP-300/301,
+written from these specifications, in Bitcoin Core.** Building it surfaced five
+more places where the specification and the reference implementation say
+different things, and one of them — item 8 — decides what the peg actually
+guarantees.
+
+Those five are not opinions about the Rust. The implementation is checked
+against the reference implementation by 46 generated vectors covering the
+message formats and `M6ID`, and agrees with it on all of them; where this
+document says "the implementation does X", that is a behaviour two
+implementations now agree on. A further list of **corrections needing no
+decision** follows the questions.
+
+| #   | Question                                       | Where               | Blocks                              | Answerable         |
+| --- | ---------------------------------------------- | ------------------- | ----------------------------------- | ------------------ |
+| 1   | Treasury UTXO when a slot is overwritten       | BIP-300 A12         | Fund safety; possibly a new rule    | Now, by discussion |
+| 2   | Which NOP opcode `OP_DRIVECHAIN` uses          | BIP-300 A13         | Every treasury `scriptPubKey`       | Now, one word      |
+| 3   | M2 header byte — `BF` or `DF`                  | BIP-300 A1          | Byte-level correctness; publication | Now, one word      |
+| 4   | One M1 / M3 per block                          | BIP-300 A9          | Enforcer change; extended B1 + B10  | Now, by discussion |
+| 5   | The 90% unused-slot threshold                  | BIP-300 A3          | Nothing — confirm or correct        | Now, by discussion |
+| 6   | What the M8 rework must preserve               | BIP-301 A7 (A3, A5) | The BIP-301 M8 section              | Now, partially     |
+| 7   | Five questions on the relaxation analysis      | NON-INVALIDATING §9 | Only the extended variant           | Later              |
+| 8   | Is Mandatory payout a real rule?               | BIP-300 M4          | What an approved withdrawal means   | Now, by discussion |
+| 9   | Must an M4 vote array match exactly?           | BIP-300 M4          | Block validity; enforcer or spec    | Now, one word      |
+| 10  | Do proposals fail early when they cannot win?  | BIP-300 M2          | When an ack is ignored              | Now, by discussion |
+| 11  | Must a blinded M6 pay out something?           | BIP-300 M6          | Enforcer change, or drop the rule   | Now, one word      |
+| 12  | Does an M7 for an inactive slot mean anything? | BIP-301             | Nothing much — confirm or correct   | Now, one word      |
+
+**Item 8 belongs beside item 1 by this document's own ordering rule** — it is
+the second question here whose answer changes what happens to money. It sits at
+8 only to keep the numbering of a list that is already under review stable.
 
 ---
 
@@ -163,6 +186,166 @@ necessarily an original author.
 
 ---
 
+# Found by implementing it
+
+The five below were not visible from the documents. They surfaced while writing
+a second implementation from these specifications and comparing it, rule by
+rule, against the reference implementation.
+
+## 8. Is "Mandatory payout" a real rule?
+
+**BIP-300, M4, "Mandatory payout". The largest gap between the specification and
+the implementation.**
+
+The specification says that when a bundle's vote count exceeds
+`WITHDRAWAL_BUNDLE_INCLUSION_THRESHOLD`, the block in which that happens MUST
+include the corresponding M6, and that a block which does not is **invalid**.
+
+**The enforcer has no such check.** The threshold appears in validation in
+exactly one place — `handle_m6` (`lib/validator/task/mod.rs:663`), where it
+gates whether an M6 that _has been submitted_ is acceptable — and once more in
+`lib/block_producer/coinbase.rs:388`, where the block producer decides whether
+to _build_ one. Nothing anywhere rejects a block for omitting a payout that has
+been approved.
+
+The difference is what the peg guarantees. Under the specification, crossing the
+threshold compels payment in that very block. Under the implementation, crossing
+it makes the bundle _payable_ — and miners who approve a withdrawal and then
+never include it strand it until it expires at 26300 blocks, at which point it
+pays nothing and must be proposed again from zero. Both are defensible designs.
+They are not the same promise to a sidechain's users.
+
+Note also that the specification's version is demanding: the block that crosses
+the threshold is the block carrying the M4 that crosses it, so a miner voting a
+bundle over the line must have the M6 constructed and included in the same
+block. That is buildable — the block producer already assembles M6s — but it is
+a real obligation on whoever mines that block, and it should be intended rather
+than inherited.
+
+**The ask:** is the Mandatory payout section a rule or aspiration? If a rule,
+the enforcer needs the check and the specification stands as written. If not,
+the section should be struck and the guarantee restated: an approved withdrawal
+is payable, not compelled.
+
+## 9. Must an M4 vote array match the active-slot count exactly?
+
+**BIP-300, M4, Validation.**
+
+The specification invalidates a block whose vote array `A` has **more** elements
+than the active-slot vector `ASN`. The implementation requires the two to be
+**equal** — `handle_m4_votes` (`lib/validator/task/mod.rs:379`) rejects on
+`upvotes.len() != active_sidechains.len()`, so a _short_ array is invalid too.
+
+A miner who votes on fewer slots than are active has a block that the
+implementation rejects and the specification accepts. That is not hypothetical
+once slots are being claimed: the active set grows, and an array built against a
+stale view of it is short rather than long.
+
+**The ask:** which is right? The implementation's rule is the more defensible —
+a short array leaves the trailing slots with no defined vote, where the
+specification's own abstain sentinel exists precisely to say "no vote" — but the
+specification says something else and one of them has to move.
+
+## 10. Do proposals fail early when they can no longer win?
+
+**BIP-300, M2, Activation.**
+
+The specification discards a proposal when its age exceeds the relevant
+`MAX_AGE`. The implementation also discards it once it has missed enough blocks
+that it can no longer reach the threshold inside the window that remains
+(`handle_failed_sidechain_proposals`, `lib/validator/task/mod.rs:324`):
+
+```
+max_fails = max_age - threshold
+fails     = age - vote_count
+failed    = age > max_age || (age > max_fails && fails >= max_fails)
+```
+
+For an empty mainnet slot that is 201 missed blocks out of 2016. A proposal with
+100 acks at block 301 is already gone under the implementation and still alive
+under the specification for another 1715 blocks.
+
+This is consensus-visible, not a tidiness optimisation. The proposal leaves D1
+earlier, so a later M2 naming it is ignored rather than counted, and the same
+`(S, proposal_id)` becomes proposable afresh sooner.
+
+**The ask:** intended? If yes it is new specification text. If no it is an
+enforcer change.
+
+## 11. Must a blinded M6 pay out something?
+
+**BIP-300, M6, "M6ID and the blinded form".**
+
+The specification says the blinded form MUST have a non-zero total payout.
+`compute_m6id` (`lib/messages.rs`) never looks at `P_total`, and nothing
+downstream does either.
+
+So a withdrawal that pays out nothing and hands the entire difference to the
+miner as fee is accepted, provided the bundle was approved. It is not obviously
+exploitable — the bundle still has to be voted through — but it is a stated MUST
+that no implementation enforces, and it burns sidechain funds to a miner rather
+than paying anyone on L1.
+
+**The ask:** keep the rule and enforce it, or drop it from the specification?
+
+## 12. Does an M7 for an inactive slot mean anything?
+
+**BIP-301, "Interaction with BIP-300".**
+
+The specification says messages naming an inactive slot have no BMM meaning. The
+implementation records an M7's commitment without checking whether the slot
+holds a sidechain (`lib/validator/task/mod.rs:953`), so an M8 naming an inactive
+slot is accepted as long as the matching M7 is in the coinbase.
+
+Nothing much turns on it — blind merge mining a sidechain that does not exist
+buys nobody anything — but it is the difference between a sentence about
+semantics and a validity rule, and an implementer has to know which it is.
+
+**The ask:** is "no BMM meaning" descriptive, or a rule that M7 and M8 for an
+inactive slot are ignored?
+
+---
+
+# Corrections needing no decision
+
+These are places where the documents are simply wrong or silent, and the
+implementation is right. They are listed for a reviewer's confidence rather than
+for a decision.
+
+**Treasury outputs on inactive slots are ordinary outputs.** The specification
+defines a treasury UTXO purely by its `scriptPubKey`. The implementation
+additionally requires the slot to hold an active sidechain and skips the output
+otherwise (`lib/validator/task/mod.rs:715`). The guard is load-bearing: without
+it a zero-value `OP_DRIVECHAIN` output naming a slot with no sidechain reads as
+a treasury moving to zero, and a perfectly good block is rejected. The
+specification needs the sentence.
+
+**The message byte counts are stated for the wrong encoding.** BIP-300 gives M2
+and M3 as "exactly 38 bytes" and M4 versions 0 and 3 as "exactly 6 bytes",
+counting the tag as raw script bytes. Every message is in fact
+`OP_RETURN <push>` with the tag at the start of the pushed data
+(`CoinbaseMessage::parse`, `lib/messages.rs:307`), so those scripts are 39 and 7
+bytes. BIP-301 already describes the encoding correctly for M7; BIP-300 does not
+for the rest.
+
+**Per-network parameters are undocumented.** The specification says non-mainnet
+networks MAY substitute shorter values. The implementation carries three named
+sets — mainnet, a tiny one for regtest, and a middle one for dry-run networks
+(`lib/types.rs`) — and an activation height below which blocks are recorded but
+never scanned for messages or deposits. Both are consensus-relevant per network
+and neither appears in the documents.
+
+**The duplicate-M3 rule is enforced indirectly.** The specification invalidates
+a block whose coinbase carries two M3s with the same `(S, M6ID)`. The
+implementation has no such check when reading coinbase messages —
+`CoinbaseMessages::push` carries `// TODO: ensure that M3 pushes are valid`
+(`lib/messages.rs:496`) — but the outcome is the same, because the first M3
+makes the bundle pending and the second then breaks the already-pending rule.
+The independent implementation reproduces this and has a test asserting the
+equivalence. No change is needed; the TODO should not be read as a gap.
+
+---
+
 ## Why this order
 
 Three rules produced it.
@@ -183,3 +366,10 @@ in a meeting, only scoped in one.
 
 Item 5 sits low not because it is unimportant but because nothing depends on it:
 whichever way it goes, no other item's answer changes.
+
+**Items 8–12 are numbered after 7 and ranked before it.** By the rules above,
+item 8 belongs beside item 1: it is a money question, and the only other one on
+the list. Items 9 and 11 are one-word answers whose cost curve is the same as
+items 2 and 3 — cheap now, expensive after anything is deployed against them.
+Item 10 needs discussion; item 12 needs a sentence. They keep their numbers only
+so that a list already under review does not renumber underneath its reviewers.
