@@ -1,0 +1,439 @@
+<pre>
+  BIP: 301
+  Layer: Consensus (soft fork)
+  Title: Blind Merged Mining (Consensus layer)
+  Authors: Paul Sztorc <truthcoin@gmail.com>
+           CryptAxe <cryptaxe@gmail.com>
+           Roberto Santacroce <roberto@santacroce.xyz>
+  Status: Draft
+  Type: Specification
+  Assigned: 2019-07-23
+  License: BSD-2-Clause
+</pre>
+
+''This document unifies the original BIP-301 draft with the LayerTwo-Labs
+protocol specification, and reconciles both against the reference
+implementation.''
+
+'''It proposes no behavioural change.''' Where the three sources agreed, the
+agreed rule is stated. Where they disagreed, the disagreement is resolved in
+favour of the reference implementation and recorded in Appendix A with its
+evidence.
+
+'''One caveat, and it is a large one.''' The M8 wire format is provisional: BMM
+bidding and accepting are being reworked, and the M8 encoding in both prior
+drafts describes a superseded design in which a BMM request was a distinct
+transaction type. The encoding stated here is the one enforced today. Appendix A,
+item 7 sets out which parts of the M8 section a redesign may change and which
+four rules it must preserve.
+
+''A separate companion proposal,''
+[[bip301-unified-extended.mediawiki|Non-Invalidating Resolution for BIP-300/301]]'', argues
+that every block-rejection rule in this BIP could be eliminated by moving BMM
+payment off-chain. None of it is incorporated here. This document is the
+baseline against which that proposal should be read.''
+
+==Abstract==
+
+Blind Merged Mining (BMM) allows SHA-256d miners to collect transaction fee
+revenue from other blockchains without running any software for those chains
+(i.e. without "looking" at them — hence "blind").
+
+Block assembly for the other chain is done by that chain's users. They choose
+the block and its transactions; simultaneously they bid on L1 for the exclusive
+right to be the creator of that block. BIP-301 ensures that L1 miners can accept
+only one bid per L2 per block, rather than accepting all of them.
+
+==Motivation==
+
+Traditional merged mining has two drawbacks:
+
+# Miners must run a full node of the other chain, i.e. non-Bitcoin software which may be buggy.
+# Miners are paid on the other chain, in that chain's currency.
+
+BIP-301 removes both. The miner runs nothing extra and is paid in BTC on L1.
+
+==Notation==
+
+We prefix otherwise ambiguous words with <code>side:</code> and
+<code>main:</code>. We name all sidechain users "Simon" and all mainchain miners
+"Mary".
+
+Each candidate side:block is identified by its side:blockhash <code>h*</code>.
+Even if the rest of the block is identical, different Simons produce different
+side:coinbases and therefore different <code>h*</code>.
+
+The key words "MUST", "MUST NOT", "REQUIRED", "SHALL", "SHALL NOT", "SHOULD",
+"SHOULD NOT", "RECOMMENDED", "MAY", and "OPTIONAL" are to be interpreted as
+described in RFC 2119.
+
+==Worked example==
+
+A side:block contains 20,000 transactions each paying $0.10, so it is worth
+$2,000 in fees. The sidechain's coinbase pays that $2,000 to Simon. Simon does
+no hashing; he makes one L1 transaction paying $1,999 to Mary. Mary ends up with
+essentially all the fee revenue without touching the sidechain.
+
+{| class="wikitable"
+|-
+! colspan="3" | Upon finding a side:block worth $2000
+|-
+! Item !! Mary (L1 miner) !! Simon (sidechain user)
+|-
+| Runs a sidechain node? || No || Yes
+|-
+| Share of hashing || 100% || 0%
+|-
+| Collected on L2 || $0 || $2000
+|-
+| Paid out on L1 || $0 || $1999
+|-
+| Received on L1 || $1999 || $0
+|-
+| Net || +$1999 || +$1
+|}
+
+BIP-301 makes this division of labour trustless: if Mary takes Simon's money,
+she must let Simon control the side:block.
+
+==Message headers==
+
+<pre>
+M7 (BMM Accept):  0x6A <push> 0xD1 0x61 0x73 0x68 ...
+M8 (BMM Request): 0x6A 0x44   0x00 0xBF 0x00 ...
+</pre>
+
+''The original draft named these "BMM Accept" and "BMM Request" without
+numbering. The M7/M8 numbering from the LayerTwo-Labs draft is adopted here; it
+is what the reference implementation and the surrounding BIP-300 message
+sequence use. Both names are given at each definition so the two literatures
+remain cross-readable.''
+
+Both are <code>OP_RETURN</code> outputs, but they are '''not''' parsed the same
+way, and the difference is easy to miss:
+
+* '''M7''' is parsed as script ''instructions'' — <code>OP_RETURN</code> followed by a single push whose data begins with the 4-byte tag <code>D1 61 73 68</code>. The push opcode is not constrained, so any valid push encoding of the payload is accepted. Every BIP-300 coinbase message is parsed this way too.
+* '''M8''' is matched against a fixed ''byte prefix'' — the script MUST begin literally <code>6A 44</code>, that is <code>OP_RETURN OP_PUSHBYTES_68</code>, followed by the 3-byte tag <code>00 BF 00</code>. The push opcode is pinned by the fixed message length, and an <code>OP_PUSHDATA1</code> encoding of the same 68 payload bytes does '''not''' parse.
+
+So the M8 tag is 3 bytes where every other tag in the BIP-300/301 family is 4,
+and the M8 script is byte-exact where the others are not. Both are artefacts of
+an earlier design rather than requirements of BIP-301; see Appendix A, items 5
+and 7.
+
+==Specification==
+
+BIP-301 consists of two messages:
+
+* '''M7 — BMM Accept.''' A coinbase output on L1 containing <code>h*</code>. Mary may endorse at most one <code>h*</code> per sidechain slot.
+* '''M8 — BMM Request.''' An ordinary L1 transaction in which Simon offers to pay Mary if and only if Mary's block contains Simon's <code>h*</code>.
+
+Mary controls the main:coinbase, so she selects which <code>h*</code> to
+endorse. Her selection determines which side:block is found, and which M8 she
+can collect.
+
+===M7 — BMM Accept===
+
+====Semantics====
+
+An M7 naming slot <code>S</code> and side:blockhash <code>H</code> means that
+the side:block with hash <code>H</code> is now blind merge mined. If it also
+passes the sidechain's own validation rules, sidechain nodes may connect it.
+
+There MUST be at most one M7 per mainchain block per sidechain slot.
+
+====Encoding====
+
+An M7 MUST be encoded as an output of the coinbase transaction:
+
+<pre>
+OP_RETURN 0xD1 0x61 0x73 0x68 <S> <H>
+</pre>
+
+<code>S</code> is 1 byte; <code>H</code> is 32 bytes. The output's
+<code>nValue</code> MUST be ignored.
+
+If no M7 outputs are present, no BMM requests were accepted, and Mary collects
+nothing from M8s.
+
+Mary and Simon MAY be the same party. In that case only M7s are needed; M8s
+exist to make the arrangement trustless between distinct parties.
+
+====Validation====
+
+A mainchain block containing more than one M7 for the same slot <code>S</code>
+is '''invalid'''.
+
+A block MAY contain an M7 with no corresponding M8: a miner may blind merge mine
+a side:block without an explicit paid request.
+
+===M8 — BMM Request===
+
+'''The encoding in this section is provisional; the validation rules are not.'''
+BMM bidding and accepting are being reworked, and the wire format below descends
+from a design in which a BMM request was a distinct transaction type rather than
+an ordinary transaction carrying an <code>OP_RETURN</code>. What follows is what
+the reference implementation enforces today. Appendix A, item 7 separates the
+parts a redesign may change from the parts it must preserve; the Validation
+subsection below is the second kind.
+
+====Semantics====
+
+An M8 is an offer of a reward to mainchain miners for including an M7 with the
+matching <code>S</code> and <code>H</code>. The miner can only collect by
+including that M7.
+
+The form of the reward is not specified here. In practice it is an ordinary
+output paying an address the miner controls, or simply the transaction fee.
+
+Only one M8 may be accepted per mainchain block per sidechain slot.
+
+====Encoding (provisional)====
+
+An M8 MUST be an ordinary Bitcoin transaction. While pending, it sits in the
+mempool unmined.
+
+The output at '''index 0''' MUST have this scriptPubKey, as exactly 70 bytes:
+
+<pre>
+OP_RETURN OP_PUSHBYTES_68 0x00 0xBF 0x00 <S> <H> <P>
+    6A          44          <-- 68 payload bytes ------>
+</pre>
+
+where <code>S</code> is 1 byte (slot), <code>H</code> is 32 bytes (side:block
+hash), and <code>P</code> is 32 bytes (the previous mainchain block hash). The
+output's <code>nValue</code> MUST be ignored.
+
+The push opcode is part of the match, not incidental: the implementation
+compares the leading bytes <code>6A 44</code> literally and then requires the
+script to end after <code>P</code>. A payload push encoded as
+<code>OP_PUSHDATA1</code>, or any trailing byte, fails to parse and the output
+is not an M8 at all. This is stricter than M7 and than every BIP-300 coinbase
+message, which are parsed as script instructions; see Message headers above.
+
+Only the output at index 0 is examined. Enforcing nodes MUST NOT interpret any
+other part of the M8 transaction. In particular, how Simon pays Mary is outside
+this specification.
+
+Note that the reference wallet also sets an <code>nLockTime</code> on the M8
+transactions it builds, and its RPC takes a block height. Neither is consensus
+relevant: nothing in validation reads them. Both are residue of the earlier
+design, in which the request's expiry was carried by the transaction rather than
+by the <code>P</code> field.
+
+''The original draft did not fix the output index; the LayerTwo-Labs draft fixes
+it at 0, as does the implementation. Adopted as current behaviour, not as a
+settled design point — see Appendix A, items 3 and 7.''
+
+====Validation====
+
+Unlike the encoding above, these rules do '''not''' depend on how a BMM request
+is carried on the wire, and a redesign of the encoding MUST preserve all three.
+
+A mainchain block is '''invalid''' if any of the following hold:
+
+# It contains an M8 with no corresponding M7 in the same block. "Corresponding" means both <code>S</code> and <code>H</code> match.
+# It contains more than one M8 for the same slot <code>S</code>.
+# It contains an M8 whose <code>P</code> is not the hash of this block's immediate parent.
+
+Rule 2 is what makes BMM trustless rather than reputational; see Rationale. Rule
+3 confines an M8 to the single block it was written for. Without it, a miner
+could hoard old requests and mine them later, collecting payment for side:blocks
+that can no longer be connected.
+
+These three rules, together with the one-M7-per-slot rule above, are the whole
+of BIP-301's consensus content. Everything else in this section is encoding.
+
+''The LayerTwo-Labs draft omits rule 3 entirely, although the reference
+implementation enforces it (<code>HandleM8::BmmRequestExpired</code>). Its
+omission appears to be an oversight rather than an intended relaxation; it is
+restored here, and the authors have confirmed it as intended. See Appendix A,
+item 2.''
+
+===Interaction with BIP-300===
+
+BIP-301 does not move coins. An M8 has no effect on any treasury UTXO, and an M7
+has no effect on the sidechain list or withdrawal list. The two BIPs share only
+the slot numbering: <code>S</code> in an M7 or M8 refers to a slot in BIP-300's
+D1, and messages naming an inactive slot have no BMM meaning.
+
+==Rationale==
+
+===Why one accept per slot per block===
+
+If a miner could accept several BMM requests for the same sidechain in one
+block, she could collect fees from several Simons while only one side:block can
+possibly be connected. Every other Simon pays for nothing. The LayerTwo-Labs
+draft states the concern directly:
+
+> If a miner is allowed to accept multiple BMM requests in the same block for
+> the same sidechain, then the miner can collect fees for sidechain blocks that
+> were not actually connected to the sidechain, which is undesirable.
+
+The one-per-slot rule makes that outcome impossible rather than merely
+detectable, and it is the reason BMM is trustless rather than reputational.
+
+Note that this is why the rule is expressed as ''block invalidity'' rather than
+as a rule for picking a winner among several requests. An M8 is an ordinary
+Bitcoin transaction whose fee reaches the miner through Bitcoin's own rules,
+regardless of what an enforcing node decides about it. Only rejecting the whole
+block reaches that revenue.
+
+===Why payment terms are unspecified===
+
+Fixing the payment mechanism in consensus would constrain the market
+unnecessarily. Leaving it open allows the offer to be an ordinary fee, an
+explicit output, or an off-chain payment.
+
+===Lightning-based requests===
+
+BMM requests MAY be made over Lightning: Simon pays Mary conditionally
+off-chain, and Mary includes the M7 to claim. BMM ''accepts'' cannot be moved
+off-chain, since they must appear in the main:coinbase.
+
+One method is described at
+[https://www.drivechain.info/media/bmm-note/bmm-lightning/ drivechain.info].
+No formal specification of it exists, and this BIP does not provide one.
+
+==Backward compatibility==
+
+This soft fork can be deployed without modifying Bitcoin Core. Non-enforcing
+nodes accept every block enforcing nodes accept, and additionally accept blocks
+enforcing nodes reject.
+
+==Deployment==
+
+This BIP deploys when/if a majority of hashrate runs the enforcer client, in
+tandem with BIP-300.
+
+==Reference implementation==
+
+[https://github.com/LayerTwo-Labs/bip300301_enforcer/ bip300301_enforcer]
+(<code>handle_m8</code> in <code>lib/validator/task/mod.rs</code>), with the
+driver layer in
+[https://github.com/LayerTwo-Labs/cusf-enforcer-mempool/ cusf-enforcer-mempool].
+
+==Companion proposal==
+
+''Non-Invalidating Resolution for BIP-300/301'' observes that all three
+validation rules above, and the one-M7-per-slot rule, exist solely because BMM
+payment is made on-chain — and that specifying Lightning-based requests would
+remove the need for every one of them. '''That argument is not made in this
+document''', which specifies the protocol as it stands. It should be read as a
+delta against this baseline.
+
+==Appendix A — Reconciliation of prior drafts==
+
+'''1. Message naming.''' Original: "BMM Accept" / "BMM Request". LayerTwo-Labs:
+M7 / M8. Adopted M7/M8, with both names given.
+
+'''2. The <code>prevMainBlock</code> rule — CONFIRMED.''' Present in the
+original draft ("The 32-bytes of prevMainBlock must match the previous
+main:blockhash"), absent from the LayerTwo-Labs draft's validation rules,
+present in the implementation. Restored, and confirmed by the authors in review
+as intended.
+
+It is in the code: <code>handle_m8</code> compares the request's
+<code>prev_mainchain_block_hash</code> against the connecting block's
+<code>header.prev_blockhash</code> and returns
+<code>HandleM8::BmmRequestExpired</code> on mismatch
+(<code>lib/validator/task/mod.rs</code>). It is now also in the specification,
+as rule 3 of the M8 validation list.
+
+'''3. M8 output index — PROVISIONAL.''' Unspecified in the original; index 0 in
+the LayerTwo-Labs draft and in the implementation, which reads
+<code>transaction.output.first()</code> and parses only that output
+(<code>parse_m8_tx</code>, <code>lib/messages.rs</code>). Recorded as what is
+enforced today.
+
+The authors note in review that BMM bidding and accepting are a work in
+progress, and that the documentation should follow whatever the new mechanism
+does. Index 0 is therefore '''not''' a settled design point. See item 7.
+
+'''4. One-M8-per-slot as a block rule — CONFIRMED, and load-bearing.''' The
+LayerTwo-Labs draft states this in its semantics section but does not restate it
+among its validation rules, where only the missing-M7 and duplicate-M7 rules
+appear. The implementation enforces it as a block-level rule
+(<code>ConnectBlock::MultipleBmmRequests</code>, raised in the transaction loop
+of <code>connect_block</code>). It is stated explicitly as rule 2 in the M8
+validation list.
+
+The authors confirm that one M8 per sidechain per block MUST be enforced, and
+that this survives the encoding rework of item 7 unchanged. It is the rule that
+makes BMM trustless rather than reputational; see Rationale.
+
+'''5. Header length — a fossil, not a design choice.''' The M8 tag is '''3'''
+bytes (<code>00 BF 00</code>), not 4 like the BIP-300 messages and M7. Both
+drafts agree, and the implementation matches
+(<code>M8BmmRequest::TAG: [u8; 3]</code>).
+
+An earlier revision of this document presented that as a quirk preserved for
+compatibility and left it there. The authors have since supplied the
+explanation: the 3-byte tag, and the shape of the M8 encoding generally, come
+from a design in which a BMM request was a '''distinct transaction type'''
+carrying a critical-data field — not an ordinary transaction with an
+<code>OP_RETURN</code> output. In that design these bytes were not an
+<code>OP_RETURN</code> header at all, which is why they do not follow the
+convention the <code>OP_RETURN</code> messages follow.
+
+The lineage is still visible in the implementation. The wallet RPC that builds
+an M8 is <code>CreateBmmCriticalDataTransaction</code>, taking
+<code>critical_hash</code>, <code>prev_bytes</code> and <code>height</code>
+(<code>lib/server/wallet/grpc.rs</code>); <code>M8BmmRequest</code>'s
+<code>sidechain_block_hash</code> field is commented "Also called H* or critical
+hash, critical data hash, hash critical" (<code>lib/messages.rs</code>); and the
+wallet still sets an <code>nLockTime</code> that no validation rule reads.
+
+A second artefact of the same origin: the M8 parser matches the '''fixed byte
+prefix''' <code>6A 44 00 BF 00</code> rather than parsing script instructions,
+so the push opcode is pinned and an <code>OP_PUSHDATA1</code> encoding of the
+same 68 payload bytes is rejected. M7 and every BIP-300 coinbase message are
+parsed as instructions and accept any valid push encoding. Nothing in BIP-301
+requires that asymmetry.
+
+Neither the 3-byte tag nor the byte-exact prefix should be read as a constraint
+on the replacement encoding. Both are documented because they describe what is
+deployed today, and because an implementer working from the deployed format
+needs to know they are traps rather than intentions.
+
+'''6. Scope of "BMM Request must match a BMM Accept".''' The original draft
+frames this as a rule making the ''transaction'' invalid; the LayerTwo-Labs
+draft and the implementation frame it as making the ''block'' invalid. Resolved
+in favour of block invalidity — a transaction-level rule would be unenforceable,
+since a non-enforcing node would accept the transaction regardless.
+
+'''7. The M8 encoding is under revision — OPEN.''' The authors report that BMM
+bidding and accepting are a work in progress, and that the M8 material in the
+prior drafts describes the deprecated special-transaction design rather than
+whatever replaces it. This document therefore specifies the current
+implementation, and separates what a redesign may change from what it must
+preserve:
+
+{| class="wikitable"
+! Must survive any redesign !! May change freely
+|-
+| An M8 is valid only if the same block's coinbase carries a matching M7 — same <code>S</code>, same <code>H</code> || Whether the request is carried in an output, and at what index
+|-
+| At most one M8 per slot per mainchain block (item 4) || The tag bytes, their length, and the push encoding (item 5)
+|-
+| An M8 binds to exactly one parent block, so a request cannot be hoarded and mined later (item 2) || Whether that binding is expressed as a <code>P</code> field, an <code>nLockTime</code>, or otherwise
+|-
+| Enforcing nodes interpret nothing else in the transaction; how the miner is paid stays out of consensus || Whether the request is an on-chain transaction at all — see the companion proposal on off-chain requests
+|}
+
+The left column is the whole of BIP-301's consensus content, and each entry has
+an argument behind it in the Rationale or in item 2. The right column is
+encoding, and has none. A reviewer of the new mechanism should check it against
+the left column and then replace the M8 encoding section wholesale, rather than
+patching the format described here.
+
+Two consequences worth stating. First, the M7 side is largely unaffected: an
+accept must appear in the main:coinbase whatever the request looks like, so the
+one-M7-per-slot rule and the M7 encoding are not in scope for this rework.
+Second, if requests move off-chain entirely, all three M8 validation rules
+disappear along with the message — which is exactly the argument the companion
+proposal makes, and the reason it treats BIP-301's rejections as removable by
+design change rather than by deterministic resolution.
+
+==Copyright==
+
+This BIP is licensed under the BSD 2-clause license.
